@@ -201,7 +201,8 @@ class DiscoveryTests(unittest.TestCase):
 
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
-        self.root = Path(self.stack.enter_context(tempfile.TemporaryDirectory(prefix="discovery-fixture-")))
+        # Resolve Windows short-name aliases before checking containment.
+        self.root = Path(self.stack.enter_context(tempfile.TemporaryDirectory(prefix="discovery-fixture-"))).resolve()
         self.stack.enter_context(patch.dict(os.environ, {
             "USERPROFILE": str(self.root), "CURSOR_USAGE_EVENTS_CSV": "", "CURSOR_USAGE_CSV": "",
         }))
