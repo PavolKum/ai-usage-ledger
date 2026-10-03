@@ -44,7 +44,7 @@ def main(argv=None):
                 result = status if args.command == "status" else {"totals": store.aggregate(project=args.project), "status": status}
         print(json.dumps(result, indent=2 if args.json else None, default=str))
         return 0 if status["complete"] else 1
-    except (OSError, ValueError, sqlite3.Error) as exc:
+    except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
         print(json.dumps({"error": str(exc)}), file=sys.stderr)
         return 1
 

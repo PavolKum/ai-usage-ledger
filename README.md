@@ -50,7 +50,24 @@ python cli.py status --db .usage-cache/private.sqlite3 --json
 
 An explicit normalized snapshot can be imported with `refresh --db PATH --export FILE`; this never enables automatic source discovery. Exit code 1 indicates a runtime problem or incomplete source coverage, and 2 indicates invalid arguments. Missing price information remains visible separately in the status. Even queries may maintain the ledger schema; they are not guaranteed to open the ledger read-only.
 
-`--project` is a case-insensitive substring filter across session directories, assigned project identifiers, and upstream project IDs. It selects whole sessions, so a session used for several projects is not split automatically. A session without usable attribution may not match. `refresh --project NAME` still ingests all selected sources and filters the displayed totals; source-health status remains global. Omitting the filter returns the whole ledger.
+`--project` is a case-insensitive substring filter, normally used to match a session's working directory. It also searches upstream project IDs and stored project identifiers. Default stored identifiers are hashes; human-readable assignments require the Python `UsageStore.assign_session` API and are not exposed as a CLI command or MCP tool. Cursor's inherited readers provide no working directory: their rows cannot be attributed to a named project automatically (matching the generic upstream label `cursor` is not project attribution).
+
+The filter selects whole sessions, so a session used for several projects is not split automatically. Sessions without matching metadata are omitted; a project total therefore does not establish coverage of all assistants. `refresh --project NAME` still ingests all selected sources and filters the displayed totals; source-health status remains global. Omitting the filter returns the whole ledger.
+
+Local discovery uses the following locations. Here `HOME` means `USERPROFILE` when set, otherwise the user's home directory; these are read when discovery is explicitly enabled.
+
+| Source | Discovery location or setting |
+|---|---|
+| OpenCode | `HOME/.local/share/opencode/*.db` |
+| Claude Code | `CLAUDE_CONFIG_DIR/projects/**/*.jsonl`, default `HOME/.claude/projects` |
+| Codex | `CODEX_HOME/sessions/**/*.jsonl` and `CODEX_HOME/archived_sessions/*.jsonl`, default `HOME/.codex`; session titles may also be read from `session_index.jsonl` |
+| Normalized snapshots | This checkout's `exports/*.jsonl`, excluding the file named after the current machine identifier |
+| Cursor CSV | `CURSOR_USAGE_EVENTS_CSV`, then `CURSOR_USAGE_CSV`; otherwise the newest `HOME/Downloads/usage-events-*.csv` |
+| Cursor database | If no CSV is selected, `APPDATA/Cursor/User/globalStorage/state.vscdb`; the fallback APPDATA path is Windows-oriented |
+
+`OPENCODE_USAGE_MACHINE_ID` overrides the default hostname stored as the machine identifier. Use `--export FILE` when you want to import only explicitly selected normalized snapshots without scanning these locations. A configured Cursor CSV that cannot be read is an error; it does not silently fall back to the database.
+
+Daily totals use the local timezone at ledger creation. If the timezone identity changes, the ledger refuses queries to avoid mixing daily boundaries. Keep the original ledger and re-ingest the original inputs into a new `--db` path in the intended timezone; manually assigned labels must be reapplied.
 
 Missing optional applications appear under `unavailable_sources`. No discovered inputs, unreadable inputs, malformed snapshots and previously ingested files that disappear remain explicit coverage failures.
 
@@ -62,7 +79,10 @@ Source discovery supports OpenCode SQLite, Claude Code JSONL, Codex JSONL, and C
 
 ```powershell
 python -m pip install -r requirements-mcp.txt
+python -B -m unittest -v test_usage_store test_verified_pricing test_release
 ```
+
+The second command enables the MCP tests. The earlier core-only command uses `-S`, which hides installed site packages and skips those tests even after installation.
 
 The server uses local stdio. Set `OPENCODE_USAGE_ALLOW_DISCOVERY=1` and `OPENCODE_USAGE_DB` to an explicit private database path in your MCP client's environment, then have it run `python server.py` from this directory. Without that opt-in, data-access tools refuse to ingest logs. Listing tools does not ingest data.
 
@@ -75,6 +95,20 @@ The release excludes OAuth quota probing, account credentials, provider HTTP cal
 `verified_pricing.py` identifies a tariff catalog checked on **6 September 2026** and records its source links. That historical label has not been independently revalidated during release preparation. The check date is not a price effective date. Legacy fallback tariffs have weaker dating/provenance. Neither source guarantees today's price or reconstructs a historical invoice.
 
 The synthetic demo uses an invented model and invented tariff, so it makes no provider-price claim. Unknown or unsupported valuations are reported as incomplete, not a proven zero bill. Subscription fees, credits, negotiated discounts, taxes, and commercial accounting reconciliation are outside scope.
+
+Use the explicit cost fields and coverage together:
+
+| Field | Meaning |
+|---|---|
+| `recorded_cost` | Sum of available recorded amounts, or `null` if none; partial coverage is possible |
+| `recorded_cost_messages` / `messages` | Events with a recorded amount / all events in the bucket |
+| `api_equivalent_cost` | Modeled tariff value; `null` when any event is unpriced or the bucket is empty |
+| `unpriced_messages` | Events without a supported valuation |
+| `cash_cost` | Legacy adapter-supplied amount, with missing values commonly represented as zero; not evidence of cash paid |
+| `implied_cost`, `cost` | Legacy blended total: for subscription-like events the larger of an adapter floor and the estimate, otherwise `cash_cost`; `cost` is its alias |
+| `total_cost` | Legacy per-event positive `cash_cost` if present, otherwise `implied_cost`, summed across events |
+
+The legacy blended fields remain in JSON for compatibility and can understate unknown usage. Do not use them as an invoice, complete spending total or substitute for the explicit recorded/estimate fields. Markdown views show recorded coverage and unknown valuations separately.
 
 The legacy parser library remains available for compatibility, but the published entry points use the ledger and its quality indicators. Direct library callers are responsible for selecting sources and inspecting diagnostics.
 

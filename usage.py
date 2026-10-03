@@ -871,37 +871,55 @@ def format_tokens(n: int) -> str:
     return str(n)
 
 
-def format_cost(c: float) -> str:
+def format_cost(c: float | None) -> str:
+    if c is None:
+        return "unknown"
     if c >= 1.0:
         return f"${c:.2f}"
     return f"${c:.4f}"
 
 
+COST_NOTE = ("*Recorded cost sums amounts present in source events; it is not an invoice or a subscription bill. "
+             "Recorded coverage shows how many events contain those amounts. API-equivalent estimates are hypothetical token costs; "
+             "unknown means no complete amount is available, not zero. Source coverage describes ingestion completeness.*")
+
+
+def cost_fields(bucket: dict) -> dict[str, str]:
+    """Render authoritative ledger fields without falling back to blended legacy costs."""
+    recorded = bucket.get("recorded_cost_messages")
+    messages = bucket.get("messages")
+    coverage = "unknown" if recorded is None or messages is None else f"{recorded}/{messages} events"
+    if recorded is not None and messages is not None and recorded < messages:
+        coverage += " (partial)"
+    complete = bucket.get("data_quality", {}).get("complete")
+    return {
+        "Recorded cost (USD)": format_cost(bucket.get("recorded_cost")),
+        "Recorded coverage": coverage,
+        "API-equivalent estimate (USD)": format_cost(bucket.get("api_equivalent_cost")),
+        "Unpriced events": str(bucket.get("unpriced_messages", "unknown")),
+        "Source coverage": "complete" if complete is True else "incomplete/stale" if complete is False else "unknown",
+    }
+
+
 def summary_to_markdown(summary: dict[str, dict]) -> str:
-    lines = ["| Period | Cash | Implied | Input | Output | Cache Read | Cache Write | Messages | Sessions |"]
-    lines.append("|---|---|---|---|---|---|---|---|---|")
+    headers = ["Period", *cost_fields({}), "Input", "Output", "Cache Read", "Cache Write", "Messages", "Sessions"]
+    lines = ["| " + " | ".join(headers) + " |", "|" + "---|" * len(headers)]
     labels = {"today": "Today", "this_week": "This Week", "this_month": "This Month", "all_time": "All Time"}
     for key in ["today", "this_week", "this_month", "all_time"]:
         b = summary[key]
         t = b["tokens"]
         lines.append(
-            f"| {labels[key]} | {format_cost(b['cash_cost'])} | {format_cost(b['implied_cost'])} | {format_tokens(t['input'])} | "
+            f"| {labels[key]} | {' | '.join(cost_fields(b).values())} | {format_tokens(t['input'])} | "
             f"{format_tokens(t['output'])} | {format_tokens(t['cache_read'])} | "
             f"{format_tokens(t['cache_write'])} | {b['messages']} | {b['sessions']} |"
         )
-    return "\n".join(lines)
+    return "\n".join(lines) + "\n\n" + COST_NOTE
 
 
 def sources_to_markdown(by_source: dict[str, dict]) -> str:
-    """Render source-breakdown aggregation.
-
-    Claude Code, Cursor, and Codex implied cost is imputed from OpenCode's
-    observed per-token rates and built-in static fallbacks (with prefix-match
-    fallback for variant suffixes like `-high-thinking`). Models with no known
-    rate stay at $0.
-    """
-    lines = ["| Source | Cash | Implied | Input | Output | Cache Read | Messages | Sessions |"]
-    lines.append("|---|---|---|---|---|---|---|---|")
+    """Render recorded amounts and API-equivalent estimates with their coverage."""
+    headers = ["Source", *cost_fields({}), "Input", "Output", "Cache Read", "Messages", "Sessions"]
+    lines = ["| " + " | ".join(headers) + " |", "|" + "---|" * len(headers)]
     for source, b in by_source.items():
         t = b["tokens"]
         estimated_messages = b.get("estimated_messages", 0)
@@ -910,38 +928,38 @@ def sources_to_markdown(by_source: dict[str, dict]) -> str:
         if estimated_messages:
             message_label = f"{message_label} (~{estimated_messages} est)"
         lines.append(
-            f"| {source}{marker} | {format_cost(b['cash_cost'])} | {format_cost(b['implied_cost'])} | {format_tokens(t['input'])} | "
+            f"| {source}{marker} | {' | '.join(cost_fields(b).values())} | {format_tokens(t['input'])} | "
             f"{format_tokens(t['output'])} | {format_tokens(t['cache_read'])} | "
             f"{message_label} | {b['sessions']} |"
         )
     lines.append("")
-    lines.append("*Implied cost is the API-equivalent estimate. Subscription, Cursor, Codex, and GHCP usage can show $0 cash while still carrying implied cost.")
+    lines.append(COST_NOTE)
     if any(bucket.get("estimated_messages", 0) for bucket in by_source.values()):
         lines.append("*Cursor rows marked with `*` are estimated from composer-level `contextTokensUsed` because this Cursor build stores zero per-bubble token counts locally.")
     return "\n".join(lines)
 
 
 def models_to_markdown(by_model: dict[str, dict]) -> str:
-    lines = ["| Model | Cash | Implied | Input | Output | Cache Read | Messages |"]
-    lines.append("|---|---|---|---|---|---|---|")
+    headers = ["Model", *cost_fields({}), "Input", "Output", "Cache Read", "Messages"]
+    lines = ["| " + " | ".join(headers) + " |", "|" + "---|" * len(headers)]
     for model, b in by_model.items():
         t = b["tokens"]
         lines.append(
-            f"| {model} | {format_cost(b['cash_cost'])} | {format_cost(b['implied_cost'])} | {format_tokens(t['input'])} | "
+            f"| {model} | {' | '.join(cost_fields(b).values())} | {format_tokens(t['input'])} | "
             f"{format_tokens(t['output'])} | {format_tokens(t['cache_read'])} | {b['messages']} |"
         )
-    return "\n".join(lines)
+    return "\n".join(lines) + "\n\n" + COST_NOTE
 
 
 def sessions_to_markdown(sessions: list[dict]) -> str:
-    lines = ["| Title | Cash | Implied | Messages | Input | Output | Cache Read | Version |"]
-    lines.append("|---|---|---|---|---|---|---|---|")
+    headers = ["Title", *cost_fields({}), "Messages", "Input", "Output", "Cache Read", "Version"]
+    lines = ["| " + " | ".join(headers) + " |", "|" + "---|" * len(headers)]
     for s in sessions:
         t = s["tokens"]
         title = (s["title"] or "untitled")[:40]
         lines.append(
-            f"| {title} | {format_cost(s['cash_cost'])} | {format_cost(s['implied_cost'])} | {s['messages']} | "
+            f"| {title} | {' | '.join(cost_fields(s).values())} | {s['messages']} | "
             f"{format_tokens(t['input'])} | {format_tokens(t['output'])} | "
             f"{format_tokens(t['cache_read'])} | {s['version']} |"
         )
-    return "\n".join(lines)
+    return "\n".join(lines) + "\n\n" + COST_NOTE

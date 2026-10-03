@@ -14,12 +14,13 @@ from unittest.mock import patch
 
 import cli
 import demo
+import usage
 import usage_store
 
 
 class ReleaseTests(unittest.TestCase):
     def setUp(self):
-        if self._testMethodName == "test_mcp_import_listing_and_all_six_tools_respect_gate":
+        if self._testMethodName.startswith("test_mcp_"):
             # Windows constructs an internal socketpair when creating a loop.
             # Create it before guards, then keep all application work guarded.
             self.loop = asyncio.new_event_loop()
@@ -163,6 +164,89 @@ class ReleaseTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as result:
                 cli.main(["status", "--db", "unused.sqlite3", "--project", "project-alpha"])
             self.assertEqual(result.exception.code, 2)
+
+    def test_cli_runtime_failure_returns_json_without_traceback(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            db = Path(temporary) / "ledger.sqlite3"
+            db.touch()
+            error = io.StringIO()
+            with patch("usage_store.UsageStore", side_effect=RuntimeError("Synthetic timezone mismatch")), redirect_stderr(error):
+                self.assertEqual(cli.main(["status", "--db", str(db)]), 1)
+            self.assertEqual(json.loads(error.getvalue()), {"error": "Synthetic timezone mismatch"})
+            self.assertNotIn("Traceback", error.getvalue())
+
+    def test_markdown_renderers_keep_unpriced_and_partial_coverage_explicit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = root / "synthetic.jsonl"
+            event = {"machine_id": "fictional-machine", "msg_id": "one", "session_id": "one",
+                     "source": "opencode", "model": "fictional/priced", "provider": "fictional",
+                     "time": 1767355200000, "input": 100, "billing_source": "api", "cost": 0.025}
+            subscription = dict(event, msg_id="two", session_id="two", source="codex", billing_source="codex")
+            subscription.pop("cost")
+            unpriced = dict(subscription, msg_id="three", session_id="three", model="fictional/unpriced")
+            fixture.write_text("".join(json.dumps(row) + "\n" for row in (event, subscription, unpriced)), encoding="utf-8")
+            with usage_store.UsageStore(root / "ledger.sqlite3") as store:
+                store.add_price("fictional/priced", {key: 0.000001 for key in ("input", "output", "cache_read", "cache_write")}, effective_from=event["time"] - 1, provenance="Invented renderer fixture tariff")
+                store.refresh(sources=[("export", str(fixture))])
+                fixture.write_text("{broken synthetic snapshot}\n", encoding="utf-8")
+                status = store.refresh(sources=[("export", str(fixture))])
+                bucket = store.aggregate()
+        self.assertIsNone(bucket["api_equivalent_cost"])
+        self.assertEqual(bucket["unpriced_messages"], 1)
+        self.assertEqual(bucket["recorded_cost_messages"], 1)
+        self.assertFalse(status["complete"])
+        bucket.update(data_quality={"complete": status["complete"]}, title="Synthetic session", version="fixture")
+        # Deliberately distinct legacy values prove rendering never falls back.
+        bucket.update(cost=999, cash_cost=888, implied_cost=777)
+        rendered = [
+            usage.summary_to_markdown({key: bucket for key in ("today", "this_week", "this_month", "all_time")}),
+            usage.sources_to_markdown({"synthetic-source": bucket}),
+            usage.models_to_markdown({"synthetic-model": bucket}),
+            usage.sessions_to_markdown([bucket]),
+        ]
+        for text in rendered:
+            with self.subTest(renderer=text.splitlines()[0]):
+                self.assertIn("Recorded cost (USD)", text)
+                self.assertIn("API-equivalent estimate (USD)", text)
+                self.assertIn("Unpriced events", text)
+                self.assertIn("| $0.0250 | 1/3 events (partial) | unknown | 1 | incomplete/stale |", text)
+                self.assertNotIn("$999", text)
+                self.assertNotIn("$888", text)
+                self.assertNotIn("$777", text)
+                self.assertIn("not an invoice or a subscription bill", text)
+        self.assertEqual(bucket["cost"], 999)
+
+    def test_cost_fields_distinguish_observed_zero_from_unknown(self):
+        legacy = usage.cost_fields({"cash_cost": 42, "implied_cost": 42, "cost": 42, "messages": 1})
+        self.assertEqual(legacy["Recorded cost (USD)"], "unknown")
+        self.assertEqual(legacy["API-equivalent estimate (USD)"], "unknown")
+        zero = usage.cost_fields({"recorded_cost": 0, "api_equivalent_cost": 0, "recorded_cost_messages": 1, "messages": 1, "unpriced_messages": 0, "data_quality": {"complete": True}})
+        self.assertEqual(zero["Recorded cost (USD)"], "$0.0000")
+        self.assertEqual(zero["API-equivalent estimate (USD)"], "$0.0000")
+        self.assertEqual(zero["Recorded coverage"], "1/1 events")
+        self.assertEqual(zero["Source coverage"], "complete")
+
+    @unittest.skipUnless(importlib.util.find_spec("mcp") and importlib.util.find_spec("pydantic"), "Optional MCP dependencies are not installed")
+    def test_mcp_query_markdown_uses_authoritative_costs_and_json_keeps_legacy_fields(self):
+        server = importlib.import_module("server")
+        bucket = {**usage.empty_bucket(), "sessions": 1, "messages": 3, "cost": 999,
+                  "recorded_cost": 0.025, "recorded_cost_messages": 1,
+                  "api_equivalent_cost": None, "unpriced_messages": 1, "data_quality": {"complete": False}}
+        status = {"complete": False, "unpriced": [{"model": "fictional/unpriced", "messages": 1}]}
+        with patch.object(server, "_query", return_value=(bucket, status)):
+            text = self.loop.run_until_complete(server.usage_query_tool(server.UsageQueryInput()))
+            self.assertIn("| Recorded cost (USD) | $0.0250 |", text)
+            self.assertIn("| Recorded coverage | 1/3 events (partial) |", text)
+            self.assertIn("| API-equivalent estimate (USD) | unknown |", text)
+            self.assertIn("| Unpriced events | 1 |", text)
+            self.assertIn("| Source coverage | incomplete/stale |", text)
+            self.assertNotIn("$999", text)
+            self.assertNotIn("| Cost |", text)
+            self.assertIn("not an invoice or a subscription bill", text)
+            payload = json.loads(self.loop.run_until_complete(server.usage_query_tool(server.UsageQueryInput(response_format="json"))))
+            self.assertEqual(payload["cost"], 999)
+            self.assertIsNone(payload["api_equivalent_cost"])
 
     @unittest.skipUnless(importlib.util.find_spec("mcp") and importlib.util.find_spec("pydantic"), "Optional MCP dependencies are not installed")
     def test_mcp_import_listing_and_all_six_tools_respect_gate(self):

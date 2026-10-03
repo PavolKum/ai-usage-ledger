@@ -24,7 +24,8 @@ from usage import (
     sources_to_markdown,
     summary_to_markdown,
     time_windows,
-    format_cost,
+    cost_fields,
+    COST_NOTE,
     format_tokens,
 )
 from usage_store import UsageStore
@@ -71,7 +72,7 @@ def _health_note(status):
     if not status["complete"]:
         notes.append("Coverage incomplete or stale; use usage_status for source failures.")
     if status["unpriced"]:
-        notes.append("Some usage has no API-equivalent price; cost totals are partial estimates.")
+        notes.append("Some events have no API-equivalent price; affected estimate totals are unknown.")
     notes.append("API-equivalent costs are estimates; imported legacy prices have unknown effective dates.")
     return "\n\n*" + " ".join(notes) + "*"
 
@@ -263,7 +264,7 @@ async def usage_query_tool(params: UsageQueryInput) -> str:
     lines = [
         "| Metric | Value |",
         "|---|---|",
-        f"| Cost | {format_cost(result['cost'])} |",
+        *[f"| {label} | {value} |" for label, value in cost_fields(result).items()],
         f"| Messages | {result['messages']} |",
         f"| Sessions | {result['sessions']} |",
         f"| Input Tokens | {format_tokens(t['input'])} |",
@@ -285,7 +286,7 @@ async def usage_query_tool(params: UsageQueryInput) -> str:
         filters.append(f"client = '{params.client_id}'")
     if filters:
         lines.insert(0, f"*Filters: {', '.join(filters)}*\n")
-    return "\n".join(lines) + _health_note(status)
+    return "\n".join(lines) + "\n\n" + COST_NOTE + _health_note(status)
 
 
 @mcp.tool(name="usage_status", description="Inspect incremental usage ingestion, source failures, stale snapshots, and missing API-equivalent pricing.")
