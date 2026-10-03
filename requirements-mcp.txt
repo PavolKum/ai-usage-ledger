@@ -1,0 +1,4 @@
+# Optional; core CLI, ledger and demo use Python's standard library.
+# Versions installed on the verification workstation, not a full dependency lock.
+mcp==1.28.1
+pydantic==2.13.4
